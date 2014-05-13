@@ -1,0 +1,212 @@
+#!/usr/bin/env ruby
+
+require 'yaml'
+require 'thor'
+require 'everyday_thor_util'
+require 'everyday-plugins'
+
+EverydayThorUtil::SubCommandTypes.def_types(:command_ids, :flag, :command, :helper)
+
+module Mvn2Chain
+  class DataStore
+    class << self
+      attr_accessor :autosave
+
+      def deps=(deps)
+        @deps = deps
+        self.save if self.autosave
+      end
+
+      def deps
+        @deps ||= load
+      end
+
+      def load
+        @deps = File.exist?('deps.mvn2chain.yaml') ? YAML::load_file('deps.mvn2chain.yaml') : {}
+      end
+
+      def save
+        IO.write('deps.mvn2chain.yaml', self.deps.to_yaml)
+      end
+    end
+    class << self.deps
+      attr_accessor :data_store
+
+      alias :old_assign :[]=
+
+      def []=(id, dep)
+        old_assign(id, dep)
+        self.data_store.save if self.data_store.autosave
+        self
+      end
+
+      alias :old_delete :delete
+
+      def delete(id, &block)
+        v = old_delete(id, &block)
+        self.data_store.save if self.data_store.autosave
+        v
+      end
+    end
+    self.deps.data_store = self
+    self.autosave        = true
+  end
+
+  class Commands
+    extend Plugin
+
+    register(:command, id: :path, parent: nil, name: 'path', short_desc: 'path', desc: 'print out the path of the current file') { puts __FILE__ }
+
+    register(:command, id: :dep, parent: nil, name: 'dep', aliases: %w(deps dependency dependencies), short_desc: 'dep SUBCOMMAND ARGS...', desc: 'alter the stored dependencies')
+
+    register(:command, id: :dep_list, parent: :dep, aliases: %w(ls), name: 'list', short_desc: 'list', desc: 'print out the list of dependencies') {
+      deps = DataStore.deps
+      if deps.empty?
+        puts 'No dependencies registered'
+      else
+        puts 'Dependencies:'
+        max_id_len = deps.keys.map { |v| v.length }.max
+        deps.each { |v| puts "#{' ' * 4}#{v[0]}#{' ' * (max_id_len + 4 - v[0].length)}=> #{v[1]}" }
+      end
+    }
+
+    register(:command, id: :dep_add, parent: :dep, name: 'add', aliases: %w(register reg), short_desc: 'add DEP_ID DEP', desc: 'add a dependency to the list') { |dep_id, dep|
+      path = File.expand_path(dep)
+      if File.exist?(path)
+        if File.directory?(path)
+          if File.exist?(File.expand_path('pom.xml', path)) || options[:force]
+            if DataStore.deps.keys.include?(dep_id) && !options[:force]
+              puts "Dependency ID '#{dep_id}' is already in use.  Use the -f / --force option to overwrite it"
+            elsif DataStore.deps.values.include?(path)
+              path_id = DataStore.deps.invert[path]
+              puts "Path '#{path}' is already registered under the dependency ID '#{path_id}'"
+            else
+              DataStore.deps[dep_id] = path
+              puts "Added dependency '#{dep_id}' => '#{path}'"
+            end
+          else
+            puts "Could not find pom.xml at path '#{path}'.  If this is still a valid maven root, use the -f/--force option"
+          end
+        else
+          puts "Path '#{path}' is not a directory.  Please provide a maven root directory"
+        end
+      else
+        puts "Path '#{dep}' does not seem to exist.  Please check that you entered it correctly"
+      end
+    }
+
+    register :flag, name: :force, aliases: ['-f'], parent: :dep_add, type: :boolean, desc: 'force the dependency to be added even if the provided directory does not contain a pom.xml or the dependency ID is already in use'
+
+    register(:command, id: :dep_remove, parent: :dep, name: 'remove', aliases: %w(rm delete del unregister unreg), short_desc: 'remove DEP_ID', desc: 'remove a dependency from the list') { |dep_id = nil|
+      if dep_id.nil?
+        if options[:all]
+          resp = ''
+          unless options[:force]
+            print 'Are you sure you want to remove all registered dependencies? (y/n) '
+            resp = IO.console.readline.chomp
+          end
+          if options[:force] || resp.downcase == 'y' || resp.downcase == 'yes'
+            DataStore.deps.clear
+            DataStore.save
+            puts 'Removed all dependencies'
+          end
+        else
+          puts 'You must specify a dependency ID to remove or use the -A / --all flag'
+        end
+      else
+        if DataStore.deps.keys.include?(dep_id)
+          DataStore.deps.delete(dep_id)
+          puts "Removed dependency '#{dep_id}'"
+        else
+          puts "Dependency ID #{dep_id} does not belong to a registered dependency."
+        end
+      end
+    }
+
+    register :flag, name: :all, aliases: ['-A'], parent: :dep_remove, type: :boolean, desc: 'remove all registered dependencies'
+    register :flag, name: :force, aliases: ['-f'], parent: :dep_remove, type: :boolean, desc: 'skip confirmation of remove all'
+
+    register(:helper, name: 'args_to_hash', parent: nil) { |*args|
+      arg_hash = { me: [] }
+      exclude  = []
+      cur_id   = :me
+      args.each { |v|
+        if v.start_with?('+')
+          cur_id           = v[1..-1]
+          arg_hash[cur_id] ||= []
+        elsif v.start_with?('~')
+          exclude << v[1..-1]
+        else
+          arg_hash[cur_id] << v
+        end
+      }
+      [arg_hash, exclude]
+    }
+
+    register(:helper, name: 'make_mvn2_command', parent: nil) { |mine|
+      "mvn2 #{array_to_args(mine).join(' ')}"
+    }
+
+    register(:helper, name: 'array_to_args', parent: nil) { |arr|
+      arr.map { |v| v.start_with?('-') ? v : "\"#{v}\"" }
+    }
+
+    register(:helper, name: 'make_chain_command', parent: nil) { |dep_id, arg_hash, exclude|
+      "mvn2chain exec #{chain_args(dep_id, arg_hash, exclude).join(' ')}"
+    }
+
+    register(:helper, name: 'chain_args', parent: nil) { |dep_id, arg_hash, exclude|
+      args = arg_hash[dep_id] || []
+      arg_hash.each { |v|
+        id = v[0]
+        unless id == dep_id
+          dep_args = v[1]
+          args << "+#{id}"
+          args += dep_args
+        end
+      }
+      args = array_to_args(args)
+      args += (exclude || []).map { |v| "~#{v}" }
+    }
+
+    register(:command, id: :exec, parent: nil, name: 'exec', aliases: %w(build), short_desc: 'exec [ARGS...]', desc: 'execute a mvn2 build.',
+             long_desc: <<LONGDESC
+Execute a mvn2 build.
+
+Specify arguments for mvn2 as you would normally, and switch to specifying arguments for a dependency (direct or indirect) with a +dep, where 'dep' is the dependency id.
+
+To skip a dependency, include a ~dep where 'dep' is the id of the dependency to exclude.
+
+Each dependency will be given the arguments for all other dependencies, as well as all of the excludes.  This way, if you want to specify an argument for a dependency of a dependency, you can specify it the same way as for a direct dependency.
+LONGDESC
+    ) { |*args|
+      arg_hash, exclude = args_to_hash(*args)
+      mine              = arg_hash.delete(:me)
+      dir               = Dir.getwd
+      unless DataStore.deps.empty?
+        puts "Starting in #{dir}"
+        DataStore.deps.each { |v|
+          if exclude.include?(v[0])
+            puts "Skipping '#{v[0]}'"
+          else
+            puts "Switching to #{v[1]}"
+            Dir.chdir(v[1])
+            chain_command = make_chain_command(v[0], arg_hash, exclude)
+            puts "> #{chain_command}"
+            system(chain_command)
+          end
+        }
+        puts "Switching back to #{dir}"
+        Dir.chdir(dir)
+      end
+      mvn2_command = make_mvn2_command(mine)
+      puts "> #{mvn2_command}"
+      system(mvn2_command)
+    }
+  end
+end
+
+root_command = Class.new(Thor)
+Plugins.get :command, root_command, nil
+
+root_command.start(ARGV)

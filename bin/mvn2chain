@@ -21,8 +21,9 @@ module Mvn2Chain
         self.save if self.autosave
       end
 
-      def deps
+      def deps(exclude = [])
         @deps ||= load
+        (exclude.nil? || exclude.empty?) ? @deps : @deps.select { |k,_| !exclude.include?(k) }
       end
 
       def load
@@ -174,7 +175,7 @@ module Mvn2Chain
     }
 
     register(:command, id: :exec, parent: nil, name: 'exec', aliases: %w(build), short_desc: 'exec [ARGS...]', desc: 'execute a mvn2 build.',
-             long_desc: <<LONGDESC
+             long_desc:    <<LONGDESC
 Execute a mvn2 build.
 
 Specify arguments for mvn2 as you would normally, and switch to specifying arguments for a dependency (direct or indirect) with a +dep, where 'dep' is the dependency id.
@@ -187,7 +188,11 @@ LONGDESC
       arg_hash, exclude = args_to_hash(*args)
       mine              = arg_hash.delete(:me)
       dir               = Dir.getwd
-      unless DataStore.deps.empty?
+      if DataStore.deps(exclude).nil? || DataStore.deps(exclude).empty?
+        DataStore.deps.each { |v|
+          puts "Skipping '#{v[0]}'"
+        }
+      else
         puts "Starting in #{dir}"
         DataStore.deps.each { |v|
           if exclude.include?(v[0])

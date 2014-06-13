@@ -9,7 +9,10 @@ require 'thor'
 require 'everyday_thor_util'
 require 'everyday-plugins'
 
+include EverydayPlugins
+
 EverydayThorUtil::SubCommandTypes.def_types(:command_ids, :flag, :command, :helper)
+
 
 module Mvn2Chain
   class DataStore
@@ -23,7 +26,7 @@ module Mvn2Chain
 
       def deps(exclude = [])
         @deps ||= load
-        (exclude.nil? || exclude.empty?) ? @deps : @deps.select { |k,_| !exclude.include?(k) }
+        (exclude.nil? || exclude.empty?) ? @deps : @deps.select { |k, _| !exclude.include?(k) }
       end
 
       def load
@@ -187,30 +190,46 @@ LONGDESC
     ) { |*args|
       arg_hash, exclude = args_to_hash(*args)
       mine              = arg_hash.delete(:me)
-      dir               = Dir.getwd
-      if DataStore.deps(exclude).nil? || DataStore.deps(exclude).empty?
-        DataStore.deps.each { |v|
-          puts "Skipping '#{v[0]}'"
-        }
-      else
-        puts "Starting in #{dir}"
-        DataStore.deps.each { |v|
-          if exclude.include?(v[0])
+      times             = 1
+      r                 = /^\*\*(\d+)$/
+      mine.each { |v| times = $1.to_i if v =~ r }
+      mine.delete_if { |v| v =~ r}
+      (1..times).each { |i|
+        if times > 1
+          puts "Starting run #{i} of #{times}"
+        end
+        dir = Dir.getwd
+        if DataStore.deps(exclude).nil? || DataStore.deps(exclude).empty?
+          DataStore.deps.each { |v|
             puts "Skipping '#{v[0]}'"
-          else
-            puts "Switching to #{v[1]}"
-            Dir.chdir(v[1])
-            chain_command = make_chain_command(v[0], arg_hash, exclude)
-            puts "> #{chain_command}"
-            system(chain_command)
-          end
-        }
-        puts "Switching back to #{dir}"
-        Dir.chdir(dir)
-      end
-      mvn2_command = make_mvn2_command(mine)
-      puts "> #{mvn2_command}"
-      system(mvn2_command)
+          }
+        else
+          puts "Starting in #{dir}"
+          DataStore.deps.each { |v|
+            if exclude.include?(v[0])
+              puts "Skipping '#{v[0]}'"
+            else
+              puts "Switching to #{v[1]}"
+              Dir.chdir(v[1])
+              chain_command = make_chain_command(v[0], arg_hash, exclude)
+              puts "> #{chain_command}"
+              system(chain_command)
+              unless $?.success?
+                puts "Canceling build due to failed dependency build #{v[0]}"
+                puts "Switching back to #{dir}"
+                Dir.chdir(dir)
+                exit 1
+              end
+            end
+          }
+          puts "Switching back to #{dir}"
+          Dir.chdir(dir)
+        end
+        mvn2_command = make_mvn2_command(mine)
+        puts "> #{mvn2_command}"
+        system(mvn2_command)
+        exit 1 unless $?.success?
+      }
     }
   end
 end

@@ -23,8 +23,9 @@ Gem::Specification.new do |spec|
   spec.add_development_dependency 'bundler', '~> 1.6'
   spec.add_development_dependency 'rake', '~> 10.0'
 
-  spec.add_dependency 'everyday-cli-utils', '~> 1.7'
+  spec.add_dependency 'everyday-cli-utils', '~> 1.8'
   spec.add_dependency 'everyday-plugins', '~> 1.2'
-  spec.add_dependency 'everyday_thor_util', '~> 1.2'
+  spec.add_dependency 'everyday_thor_util', '~> 1.5', '>= 1.5.3'
   spec.add_dependency 'thor', '~> 0.19'
+  spec.add_dependency 'mvn2', '~> 2.6', '>= 2.6.4'
 end
